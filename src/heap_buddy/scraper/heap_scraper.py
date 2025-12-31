@@ -470,6 +470,77 @@ class HeapScraper:
             pass
         return data
 
+    def _is_analytics_link(self, href: str, text: str) -> bool:
+        """Check if a link is a valid Heap Analytics dashboard link (not support/external)"""
+        href_lower = href.lower()
+        text_lower = text.lower()
+
+        # URLs to EXCLUDE (support, docs, external sites, etc.)
+        excluded_patterns = [
+            '/support', '/help', '/docs', '/documentation', '/learn',
+            '/contact', '/feedback', '/community', '/forum',
+            '/settings', '/account', '/billing', '/profile', '/preferences',
+            '/logout', '/signout', '/sign-out', '/log-out',
+            '/login', '/signin', '/sign-in', '/log-in', '/auth',
+            '/api', '/developer', '/integrations', '/sdk',
+            '/blog', '/news', '/updates', '/changelog', '/release',
+            '/pricing', '/plans', '/upgrade', '/subscribe',
+            '/terms', '/privacy', '/legal', '/security', '/compliance',
+            '/status', '/health',
+            'zendesk', 'intercom', 'freshdesk', 'helpscout',
+            'twitter.com', 'facebook.com', 'linkedin.com', 'github.com',
+            'mailto:', 'tel:', 'javascript:',
+        ]
+
+        # Check for excluded patterns
+        for pattern in excluded_patterns:
+            if pattern in href_lower:
+                return False
+
+        # Text-based exclusions
+        excluded_text = [
+            'support', 'help', 'docs', 'documentation', 'contact',
+            'log out', 'logout', 'sign out', 'signout',
+            'settings', 'account', 'profile', 'billing',
+            'upgrade', 'pricing', 'plans',
+        ]
+
+        for pattern in excluded_text:
+            if pattern in text_lower:
+                return False
+
+        # Must be on the same domain (heapanalytics.com or heap.io)
+        current_url = self.browser.get_current_url().lower()
+        # Extract domain from current URL
+        from urllib.parse import urlparse
+        current_domain = urlparse(current_url).netloc
+        link_domain = urlparse(href).netloc
+
+        # Allow same domain or subdomains
+        if link_domain and current_domain:
+            if not (link_domain == current_domain or
+                    link_domain.endswith('.' + current_domain) or
+                    current_domain.endswith('.' + link_domain) or
+                    'heap' in link_domain):
+                return False
+
+        # Prefer links that look like analytics pages
+        analytics_patterns = [
+            '/app', '/dashboard', '/analyze', '/data', '/report',
+            '/chart', '/funnel', '/retention', '/event', '/user',
+            '/segment', '/path', '/flow', '/insight', '/metric',
+            '/pageview', '/session', '/cohort', '/query', '/explore',
+            '/home', '/overview', '/summary',
+        ]
+
+        # Give preference to analytics-looking URLs
+        for pattern in analytics_patterns:
+            if pattern in href_lower:
+                return True
+
+        # If it's on the same domain and not excluded, allow it
+        return True
+
     def _find_sidebar_links(self) -> List[Dict[str, str]]:
         """Find all navigation links in the sidebar - returns dicts with text and href"""
         links = []
@@ -526,7 +597,18 @@ class HeapScraper:
                 except:
                     continue
 
-        return links
+        # Filter to only include valid analytics links
+        filtered_links = []
+        for link in links:
+            href = link.get('href', '')
+            text = link.get('text', '')
+            if self._is_analytics_link(href, text):
+                filtered_links.append(link)
+            else:
+                print(f"  Skipping non-analytics link: {text[:30]}...")
+
+        print(f"  Filtered {len(links)} links down to {len(filtered_links)} analytics links")
+        return filtered_links
 
     def _find_clickable_elements(self) -> List[Any]:
         """Find clickable elements in the main content area"""
