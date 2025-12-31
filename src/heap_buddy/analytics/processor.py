@@ -31,7 +31,7 @@ class AnalyticsProcessor:
         Args:
             data: Processed data from HeapDataExtractor
         """
-        self.data = data
+        self.data = data if data is not None else {}
         self.insights: List[AnalyticsInsight] = []
 
     def analyze_all(self) -> Dict[str, Any]:

@@ -94,7 +94,7 @@ class HeapDataExtractor:
 
     def load_raw_data(self, data: Dict[str, Any]):
         """Load raw extracted data"""
-        self._raw_data = data
+        self._raw_data = data if data is not None else {}
         return self
 
     def load_from_file(self, filepath: str):

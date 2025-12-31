@@ -126,6 +126,7 @@ class HeapScraper:
         print("Navigating to Heap Analytics...")
         self.browser.navigate(self.config.heap.login_url)
         self.browser.wait_for_page_load()
+        time.sleep(3)  # Extra wait for page to fully render
 
         # Check if already logged in (redirected to dashboard)
         current_url = self.browser.get_current_url()
