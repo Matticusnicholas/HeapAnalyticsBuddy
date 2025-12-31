@@ -135,8 +135,8 @@ cython_debug/
 *.swo
 *~
 
-# Project specific
-reports/
+# Project specific - output reports (not src/heap_buddy/reports/)
+/reports/
 *.pdf
 *.docx
 raw_data.json
