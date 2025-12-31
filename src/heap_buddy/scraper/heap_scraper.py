@@ -251,64 +251,205 @@ class HeapScraper:
         return filename
 
     def _extract_text_content(self) -> Dict[str, Any]:
-        """Extract all text content from the current page"""
+        """Extract all text content from the current page using comprehensive JavaScript"""
         content = {
             "url": self.browser.get_current_url(),
             "title": "",
             "numbers": [],
             "text_blocks": [],
             "tables": [],
-            "lists": []
+            "lists": [],
+            "all_text": "",
+            "metrics": {}
         }
 
         try:
-            # Get page title
-            title_elem = self.browser.find_element("h1, .title, .page-title, [class*='title']")
-            if title_elem:
-                content["title"] = title_elem.text if hasattr(title_elem, 'text') else ""
+            # Use JavaScript to extract ALL visible content comprehensively
+            js_result = self.browser.execute_script("""
+                const result = {
+                    title: '',
+                    numbers: [],
+                    text_blocks: [],
+                    tables: [],
+                    all_text: '',
+                    metrics: {}
+                };
 
-            # Extract all visible numbers/metrics
-            number_elements = self.browser.find_elements(self.SELECTORS["numbers"])
-            for elem in number_elements:
-                try:
-                    text = elem.text if hasattr(elem, 'text') else ""
-                    if text and any(c.isdigit() for c in text):
-                        content["numbers"].append(text.strip())
-                except:
-                    continue
+                // Get page title
+                const h1 = document.querySelector('h1');
+                if (h1) result.title = h1.innerText.trim();
+                if (!result.title) {
+                    const title = document.querySelector('[class*="title"], [class*="heading"], .page-title');
+                    if (title) result.title = title.innerText.trim();
+                }
 
-            # Extract metric cards
-            cards = self.browser.find_elements(self.SELECTORS["metric_cards"])
-            for card in cards:
-                try:
-                    text = card.text if hasattr(card, 'text') else ""
-                    if text:
-                        content["text_blocks"].append(text.strip())
-                except:
-                    continue
+                // Extract ALL visible text from the page (excluding scripts/styles)
+                const walker = document.createTreeWalker(
+                    document.body,
+                    NodeFilter.SHOW_TEXT,
+                    {
+                        acceptNode: function(node) {
+                            if (!node.parentElement) return NodeFilter.FILTER_REJECT;
+                            const tag = node.parentElement.tagName.toLowerCase();
+                            if (['script', 'style', 'noscript', 'svg'].includes(tag)) {
+                                return NodeFilter.FILTER_REJECT;
+                            }
+                            const text = node.textContent.trim();
+                            if (!text || text.length < 1) return NodeFilter.FILTER_REJECT;
+                            // Check if element is visible
+                            const style = window.getComputedStyle(node.parentElement);
+                            if (style.display === 'none' || style.visibility === 'hidden') {
+                                return NodeFilter.FILTER_REJECT;
+                            }
+                            return NodeFilter.FILTER_ACCEPT;
+                        }
+                    }
+                );
 
-            # Extract tables
-            tables = self.browser.find_elements(self.SELECTORS["data_table"])
-            for table in tables:
-                try:
-                    table_data = self._extract_table_data(table)
-                    if table_data:
-                        content["tables"].append(table_data)
-                except:
-                    continue
+                const allTexts = [];
+                while (walker.nextNode()) {
+                    const text = walker.currentNode.textContent.trim();
+                    if (text) allTexts.push(text);
+                }
+                result.all_text = allTexts.join(' ');
 
-            # Extract list items
-            lists = self.browser.find_elements(self.SELECTORS["list_items"])
-            for item in lists[:50]:  # Limit to prevent too many items
-                try:
-                    text = item.text if hasattr(item, 'text') else ""
-                    if text and len(text) < 500:  # Skip very long items
-                        content["lists"].append(text.strip())
-                except:
-                    continue
+                // Find all numbers/metrics on the page
+                const numberRegex = /[\\d,]+\\.?\\d*%?|\\d+[KkMmBb]?\\+?/g;
+                const seenNumbers = new Set();
+                allTexts.forEach(text => {
+                    const matches = text.match(numberRegex);
+                    if (matches) {
+                        matches.forEach(m => {
+                            if (m.length > 0 && m.length < 50 && !seenNumbers.has(m)) {
+                                seenNumbers.add(m);
+                                result.numbers.push(m);
+                            }
+                        });
+                    }
+                });
+
+                // Extract text blocks from divs and sections (potential metric containers)
+                const containers = document.querySelectorAll('div, section, article, aside, main');
+                containers.forEach(el => {
+                    try {
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none') return;
+
+                        const text = el.innerText.trim();
+                        // Look for blocks that might contain metric data (has numbers)
+                        if (text && text.length > 3 && text.length < 500 && /\\d/.test(text)) {
+                            // Only add if it's a "leaf" block (not containing many child blocks)
+                            const childDivs = el.querySelectorAll('div, section');
+                            if (childDivs.length < 3) {
+                                result.text_blocks.push(text);
+                            }
+                        }
+                    } catch(e) {}
+                });
+
+                // Deduplicate text blocks
+                result.text_blocks = [...new Set(result.text_blocks)].slice(0, 100);
+
+                // Extract tables
+                document.querySelectorAll('table').forEach(table => {
+                    const tableData = [];
+                    table.querySelectorAll('tr').forEach(row => {
+                        const rowData = [];
+                        row.querySelectorAll('th, td').forEach(cell => {
+                            rowData.push(cell.innerText.trim());
+                        });
+                        if (rowData.some(d => d)) tableData.push(rowData);
+                    });
+                    if (tableData.length > 0) result.tables.push(tableData);
+                });
+
+                // Also look for grid/list structures that might be tables
+                document.querySelectorAll('[class*="grid"], [class*="list"], [class*="row"]').forEach(el => {
+                    try {
+                        const items = el.querySelectorAll('[class*="cell"], [class*="col"], [class*="item"]');
+                        if (items.length > 2) {
+                            const rowData = [];
+                            items.forEach(item => {
+                                const text = item.innerText.trim();
+                                if (text && text.length < 200) rowData.push(text);
+                            });
+                            if (rowData.length > 0) result.tables.push([rowData]);
+                        }
+                    } catch(e) {}
+                });
+
+                // Try to identify metric pairs (label + value)
+                document.querySelectorAll('*').forEach(el => {
+                    try {
+                        if (el.children.length === 0) return; // Skip leaf nodes
+                        if (el.children.length > 5) return; // Skip containers
+
+                        const text = el.innerText.trim();
+                        const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+
+                        // Look for label/value pairs
+                        if (lines.length === 2) {
+                            const [first, second] = lines;
+                            // If second line looks like a number/metric
+                            if (/^[\\d,\\.%$KkMmBb\\s]+$/.test(second) && first.length < 50) {
+                                result.metrics[first] = second;
+                            }
+                            // Or if first line looks like a number
+                            else if (/^[\\d,\\.%$KkMmBb\\s]+$/.test(first) && second.length < 50) {
+                                result.metrics[second] = first;
+                            }
+                        }
+                    } catch(e) {}
+                });
+
+                return result;
+            """)
+
+            if js_result:
+                content["title"] = js_result.get("title", "")
+                content["numbers"] = js_result.get("numbers", [])[:100]  # Limit
+                content["text_blocks"] = js_result.get("text_blocks", [])
+                content["tables"] = js_result.get("tables", [])
+                content["all_text"] = js_result.get("all_text", "")[:5000]  # Limit size
+                content["metrics"] = js_result.get("metrics", {})
+
+                print(f"  JS extraction: {len(content['numbers'])} numbers, "
+                      f"{len(content['text_blocks'])} blocks, "
+                      f"{len(content['tables'])} tables, "
+                      f"{len(content['metrics'])} metrics")
 
         except Exception as e:
-            print(f"  Error extracting content: {e}")
+            print(f"  JS extraction error: {e}, falling back to Selenium")
+
+            # Fallback to Selenium-based extraction
+            try:
+                # Get page title
+                title_elem = self.browser.find_element("h1, .title, .page-title, [class*='title']")
+                if title_elem:
+                    content["title"] = title_elem.text if hasattr(title_elem, 'text') else ""
+
+                # Get body text as fallback
+                body = self.browser.find_element("body")
+                if body:
+                    content["all_text"] = body.text[:5000] if hasattr(body, 'text') else ""
+
+                    # Extract numbers from body text
+                    import re
+                    numbers = re.findall(r'[\d,]+\.?\d*%?|\d+[KkMmBb]?\+?', content["all_text"])
+                    content["numbers"] = list(set(numbers))[:100]
+
+                # Extract tables using Selenium
+                tables = self.browser.find_elements(self.SELECTORS["data_table"])
+                for table in tables:
+                    try:
+                        table_data = self._extract_table_data(table)
+                        if table_data:
+                            content["tables"].append(table_data)
+                    except:
+                        continue
+
+            except Exception as e2:
+                print(f"  Fallback extraction also failed: {e2}")
 
         return content
 
@@ -530,6 +671,10 @@ class HeapScraper:
         sections_data = self.explore_sidebar()
 
         # Compile all data
+        compiled_metrics = self._compile_metrics(dashboard_data, sections_data)
+        compiled_pages = self._compile_pages(sections_data)
+        compiled_events = self._compile_events(sections_data)
+
         all_data = {
             "extraction_date": datetime.now().isoformat(),
             "date_range_days": date_range_days,
@@ -539,14 +684,26 @@ class HeapScraper:
             "visited_urls": list(self._visited_urls),
             "screenshot_count": self._screenshot_count,
             # For backward compatibility with report generator
-            "dashboard_metrics": self._compile_metrics(dashboard_data, sections_data),
-            "page_analytics": self._compile_pages(sections_data),
-            "events": self._compile_events(sections_data),
+            "dashboard_metrics": compiled_metrics,
+            "page_analytics": compiled_pages,
+            "events": compiled_events,
             "user_paths": [],
             "user_segments": [],
             "funnels": self._compile_funnels(sections_data),
             "retention": self._compile_retention(sections_data),
+            # Additional raw text data for analysis
+            "raw_text_summary": {
+                "dashboard_text": dashboard_data.get("all_text", "")[:2000],
+                "section_texts": {
+                    name: data.get("all_text", "")[:1000]
+                    for name, data in sections_data.items()
+                }
+            }
         }
+
+        # Log extraction summary
+        print(f"\n  Compiled: {len(compiled_metrics)} metrics, "
+              f"{len(compiled_pages)} pages, {len(compiled_events)} events")
 
         self._extracted_data = all_data
 
@@ -563,9 +720,14 @@ class HeapScraper:
         """Compile metrics from extracted data for backward compatibility"""
         metrics = {}
 
+        # Extract from dashboard's identified metrics
+        dashboard_metrics = dashboard.get("metrics", {})
+        metrics.update(dashboard_metrics)
+
         # Extract from dashboard numbers
         for i, num in enumerate(dashboard.get("numbers", [])[:20]):
-            metrics[f"metric_{i+1}"] = num
+            if f"metric_{i+1}" not in metrics:
+                metrics[f"metric_{i+1}"] = num
 
         # Extract from text blocks that look like metrics
         for block in dashboard.get("text_blocks", []):
@@ -574,8 +736,21 @@ class HeapScraper:
                 # Assume format: label\nvalue
                 label = lines[0].strip()
                 value = lines[1].strip()
-                if any(c.isdigit() for c in value):
+                if any(c.isdigit() for c in value) and label not in metrics:
                     metrics[label] = value
+
+        # Also compile metrics from each section
+        for section_name, section_data in sections.items():
+            section_metrics = section_data.get("metrics", {})
+            for key, val in section_metrics.items():
+                full_key = f"{section_name}: {key}" if key in metrics else key
+                metrics[full_key] = val
+
+            # Add section numbers as backup
+            for i, num in enumerate(section_data.get("numbers", [])[:10]):
+                key = f"{section_name}_metric_{i+1}"
+                if key not in metrics:
+                    metrics[key] = num
 
         return metrics
 
@@ -584,9 +759,9 @@ class HeapScraper:
         pages = []
 
         for section_name, section_data in sections.items():
+            # Extract from tables
             for table in section_data.get("tables", []):
                 if len(table) > 1:  # Has header and data
-                    headers = table[0] if table else []
                     for row in table[1:]:
                         if row and len(row) >= 2:
                             page_data = {
@@ -598,6 +773,19 @@ class HeapScraper:
                             }
                             if page_data["page"]:
                                 pages.append(page_data)
+
+            # Extract page-like entries from text blocks
+            for block in section_data.get("text_blocks", []):
+                # Look for URL-like patterns or page paths
+                lines = block.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith('/') or 'http' in line.lower():
+                        pages.append({
+                            "page": line,
+                            "views": "",
+                            "source_section": section_name
+                        })
 
         return pages
 
