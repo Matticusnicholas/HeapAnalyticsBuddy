@@ -1,0 +1,74 @@
+# Heap Analytics Buddy Configuration
+# Copy this file to heap_buddy_config.yaml and customize
+
+# Browser settings
+browser:
+  # Browser type: firefox, chrome, playwright-firefox, playwright-chrome, playwright-webkit
+  browser_type: firefox
+
+  # Run in headless mode (no visible browser window)
+  headless: false
+
+  # Path to browser profile for using existing login sessions
+  # Firefox: ~/.mozilla/firefox/xxxxx.default
+  # Chrome: ~/.config/google-chrome/Default (Linux)
+  # profile_path: null
+
+  # Firefox profile name (alternative to profile_path)
+  # firefox_profile: default
+
+  # Chrome user data directory
+  # user_data_dir: null
+
+  # Timeout settings (seconds)
+  timeout: 30
+  implicit_wait: 10
+
+  # Browser window size
+  window_width: 1920
+  window_height: 1080
+
+# Heap Analytics settings
+heap:
+  base_url: https://heapanalytics.com
+  login_url: https://heapanalytics.com/login
+  dashboard_url: https://heapanalytics.com/app
+
+  # Credentials - RECOMMENDED: use environment variables instead
+  # Set HEAP_EMAIL and HEAP_PASSWORD in your environment
+  # email: null
+  # password: null
+
+  # Organization ID (if you have multiple)
+  # organization_id: null
+
+# Report settings
+report:
+  # Output directory for generated reports
+  output_dir: ./reports
+
+  # Output formats: pdf, docx
+  output_format:
+    - pdf
+    - docx
+
+  # Include charts and graphs
+  include_charts: true
+
+  # Chart style: modern, classic, minimal
+  chart_style: modern
+
+  # Date range for data extraction (days)
+  date_range_days: 30
+
+  # Include raw data tables in report
+  include_raw_data: false
+
+  # Report customization
+  report_title: "Heap Analytics Report"
+  company_name: null  # Your company name
+  logo_path: null     # Path to your logo image
+
+# Application settings
+verbose: false
+debug: false
