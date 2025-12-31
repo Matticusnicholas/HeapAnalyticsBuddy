@@ -329,45 +329,63 @@ class HeapScraper:
             pass
         return data
 
-    def _find_sidebar_links(self) -> List[Any]:
-        """Find all navigation links in the sidebar"""
+    def _find_sidebar_links(self) -> List[Dict[str, str]]:
+        """Find all navigation links in the sidebar - returns dicts with text and href"""
         links = []
 
-        # Try multiple selector strategies
-        selectors = [
-            "nav a",
-            "aside a",
-            ".sidebar a",
-            ".nav a",
-            ".side-nav a",
-            "[role='navigation'] a",
-            ".menu a",
-            ".nav-menu a",
-            "[class*='sidebar'] a",
-            "[class*='nav'] a:not([class*='navbar'])",
-        ]
+        # Use JavaScript to get all links to avoid stale element issues
+        try:
+            js_links = self.browser.execute_script("""
+                const links = [];
+                const selectors = [
+                    'nav a', 'aside a', '.sidebar a', '.nav a', '.side-nav a',
+                    '[role="navigation"] a', '.menu a', '[class*="sidebar"] a',
+                    '[class*="nav-"] a', '.navigation a'
+                ];
 
-        for selector in selectors:
-            try:
-                found = self.browser.find_elements(selector)
-                if found:
-                    links.extend(found)
-            except:
-                continue
+                const seen = new Set();
+                selectors.forEach(sel => {
+                    try {
+                        document.querySelectorAll(sel).forEach(a => {
+                            const href = a.href;
+                            const text = a.innerText.trim();
+                            if (href && text && !seen.has(href) && !href.includes('javascript:')) {
+                                seen.add(href);
+                                links.push({text: text, href: href});
+                            }
+                        });
+                    } catch(e) {}
+                });
+                return links;
+            """)
+            if js_links:
+                links = js_links
+        except Exception as e:
+            print(f"  JS link extraction failed: {e}")
 
-        # Remove duplicates based on href
-        seen_hrefs = set()
-        unique_links = []
-        for link in links:
-            try:
-                href = link.get_attribute('href') if hasattr(link, 'get_attribute') else None
-                if href and href not in seen_hrefs:
-                    seen_hrefs.add(href)
-                    unique_links.append(link)
-            except:
-                continue
+        # Fallback to Selenium if JS didn't work
+        if not links:
+            selectors = [
+                "nav a", "aside a", ".sidebar a", ".nav a", ".side-nav a",
+                "[role='navigation'] a", ".menu a", "[class*='sidebar'] a",
+            ]
+            seen_hrefs = set()
+            for selector in selectors:
+                try:
+                    found = self.browser.find_elements(selector)
+                    for link in found:
+                        try:
+                            href = link.get_attribute('href') if hasattr(link, 'get_attribute') else None
+                            text = link.text if hasattr(link, 'text') else ""
+                            if href and text and href not in seen_hrefs:
+                                seen_hrefs.add(href)
+                                links.append({"text": text.strip(), "href": href})
+                        except:
+                            continue
+                except:
+                    continue
 
-        return unique_links
+        return links
 
     def _find_clickable_elements(self) -> List[Any]:
         """Find clickable elements in the main content area"""
@@ -407,36 +425,24 @@ class HeapScraper:
         self._take_screenshot("initial_dashboard")
         time.sleep(2)
 
-        # Find all sidebar links
-        sidebar_links = self._find_sidebar_links()
-        print(f"\nFound {len(sidebar_links)} navigation links")
+        # Find all sidebar links (returns list of dicts with text and href)
+        link_info = self._find_sidebar_links()
+        print(f"\nFound {len(link_info)} navigation links")
+        print(f"Navigation items: {[l.get('text', 'unknown') for l in link_info]}")
 
-        # Get link info before clicking (as clicking may change the DOM)
-        link_info = []
-        for link in sidebar_links:
-            try:
-                text = link.text if hasattr(link, 'text') else ""
-                href = link.get_attribute('href') if hasattr(link, 'get_attribute') else ""
-                if text and href:
-                    link_info.append({"text": text.strip(), "href": href, "element": link})
-            except:
-                continue
-
-        print(f"Navigation items: {[l['text'] for l in link_info]}")
-
-        # Click each link and extract data
+        # Navigate to each link and extract data
         for i, info in enumerate(link_info):
-            section_name = info['text']
-            href = info['href']
+            section_name = info.get('text', f'Section_{i}')
+            href = info.get('href', '')
 
-            # Skip if already visited
-            if href in self._visited_urls:
+            # Skip if no href or already visited
+            if not href or href in self._visited_urls:
                 continue
 
             print(f"\n[{i+1}/{len(link_info)}] Exploring: {section_name}")
 
             try:
-                # Navigate to the link
+                # Navigate to the link (use URL, not element click to avoid stale refs)
                 self.browser.navigate(href)
                 self.browser.wait_for_page_load()
                 self._wait_for_loading()
@@ -444,17 +450,15 @@ class HeapScraper:
                 self._visited_urls.add(href)
 
                 # Take screenshot
-                safe_name = "".join(c if c.isalnum() else "_" for c in section_name)
+                safe_name = "".join(c if c.isalnum() else "_" for c in section_name)[:30]
                 self._take_screenshot(safe_name)
 
                 # Extract content
                 section_data = self._extract_text_content()
                 section_data["section_name"] = section_name
 
-                # Try to find and click sub-items for more detail
-                sub_data = self._explore_section_details()
-                if sub_data:
-                    section_data["details"] = sub_data
+                # Skip detail exploration to avoid stale element issues
+                # (Can be re-enabled if needed with more robust handling)
 
                 all_sections[section_name] = section_data
                 print(f"  Extracted: {len(section_data.get('numbers', []))} numbers, "
