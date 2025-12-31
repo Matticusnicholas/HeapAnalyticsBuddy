@@ -1,9 +1,11 @@
 """
 Heap Analytics web scraper for data extraction
+Uses click-based navigation to explore all available sections
 """
 
 import time
 import json
+import os
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -54,40 +56,41 @@ class HeapEvent:
 class HeapScraper:
     """
     Scrapes data from Heap Analytics dashboard using browser automation
+    Uses click-based navigation to explore all sections dynamically
     """
 
-    # Common Heap Analytics selectors (may need updates as Heap UI changes)
+    # Selectors for finding elements - multiple options for flexibility
     SELECTORS = {
         # Login page
-        "email_input": "input[type='email'], input[name='email'], #email",
+        "email_input": "input[type='email'], input[name='email'], #email, input[placeholder*='mail']",
         "password_input": "input[type='password'], input[name='password'], #password",
-        "login_button": "button[type='submit'], input[type='submit'], .login-button",
+        "login_button": "button[type='submit'], input[type='submit'], button:contains('Log'), button:contains('Sign')",
 
-        # Dashboard navigation
-        "dashboard_nav": "[data-testid='nav-dashboard'], .nav-dashboard, a[href*='dashboard']",
-        "analyze_nav": "[data-testid='nav-analyze'], .nav-analyze, a[href*='analyze']",
-        "users_nav": "[data-testid='nav-users'], .nav-users, a[href*='users']",
-        "events_nav": "[data-testid='nav-events'], .nav-events, a[href*='events']",
+        # Sidebar navigation - broad selectors to catch various UI patterns
+        "sidebar": "nav, aside, [role='navigation'], .sidebar, .nav-sidebar, .side-nav, #sidebar",
+        "nav_links": "nav a, aside a, .sidebar a, .nav-link, .menu-item, [role='menuitem'], .side-nav a",
 
-        # Date picker
-        "date_picker": ".date-picker, [data-testid='date-picker'], .date-range-selector",
-        "date_preset_7d": "[data-value='7d'], .preset-7d",
-        "date_preset_30d": "[data-value='30d'], .preset-30d",
-        "date_preset_90d": "[data-value='90d'], .preset-90d",
+        # Main content area
+        "main_content": "main, .main-content, .content, #content, [role='main'], .dashboard",
 
-        # Data tables and charts
-        "data_table": ".data-table, table, [data-testid='data-table']",
-        "chart_container": ".chart-container, .chart, [data-testid='chart']",
-        "metric_card": ".metric-card, .kpi-card, [data-testid='metric']",
+        # Clickable cards and metrics
+        "metric_cards": ".metric, .card, .kpi, .stat, .widget, [class*='metric'], [class*='card'], [class*='stat']",
+        "clickable_items": ".clickable, [role='button'], [onclick], [class*='click'], button:not([type='submit'])",
 
-        # User list
-        "user_row": ".user-row, tr[data-user-id], .user-list-item",
+        # Data containers
+        "data_table": "table, .table, [class*='table'], .data-grid, .grid",
+        "chart_container": ".chart, [class*='chart'], .graph, [class*='graph'], svg, canvas",
+        "list_items": "li, .list-item, .row, tr",
 
-        # Event list
-        "event_row": ".event-row, tr[data-event], .event-list-item",
+        # Numbers and values
+        "numbers": ".number, .value, .count, .metric-value, [class*='number'], [class*='value']",
 
         # Loading indicators
-        "loading": ".loading, .spinner, [data-loading='true']",
+        "loading": ".loading, .spinner, [class*='loading'], [class*='spinner'], .loader",
+
+        # Date/time selectors
+        "date_picker": ".date-picker, .date-range, [class*='date'], .calendar, input[type='date']",
+        "dropdown": "select, .dropdown, [class*='dropdown'], .select",
     }
 
     def __init__(self, config: AppConfig):
@@ -95,6 +98,8 @@ class HeapScraper:
         self.browser: Optional[BaseBrowser] = None
         self._is_logged_in = False
         self._extracted_data: Dict[str, Any] = {}
+        self._visited_urls: set = set()
+        self._screenshot_count = 0
 
     def start_browser(self) -> bool:
         """Initialize and start the browser"""
@@ -126,12 +131,12 @@ class HeapScraper:
         print("Navigating to Heap Analytics...")
         self.browser.navigate(self.config.heap.login_url)
         self.browser.wait_for_page_load()
-        time.sleep(3)  # Extra wait for page to fully render
+        time.sleep(5)  # Extra wait for page to fully render
 
-        # Check if already logged in (redirected to dashboard)
+        # Check if already logged in (look for dashboard elements or URL patterns)
         current_url = self.browser.get_current_url()
-        if "/app" in current_url or "dashboard" in current_url:
-            print("Already logged in via browser session!")
+        if self._check_if_logged_in(current_url):
+            print("Already logged in!")
             self._is_logged_in = True
             return True
 
@@ -150,36 +155,59 @@ class HeapScraper:
         print("Attempting automated login...")
         try:
             # Enter email
-            if not self.browser.wait_for_element(self.SELECTORS["email_input"], timeout=10):
+            if not self.browser.wait_for_element(self.SELECTORS["email_input"], timeout=15):
                 print("Could not find email input field")
-                return False
+                return self._wait_for_manual_login()
 
             self.browser.type_text(self.SELECTORS["email_input"], email)
-            time.sleep(0.5)
+            time.sleep(1)
 
             # Enter password
             self.browser.type_text(self.SELECTORS["password_input"], password)
-            time.sleep(0.5)
+            time.sleep(1)
 
             # Click login button
             self.browser.click(self.SELECTORS["login_button"])
 
-            # Wait for redirect to dashboard
-            time.sleep(3)
+            # Wait for redirect
+            time.sleep(5)
             self.browser.wait_for_page_load()
+            time.sleep(3)
 
             current_url = self.browser.get_current_url()
-            if "/app" in current_url or "dashboard" in current_url:
+            if self._check_if_logged_in(current_url):
                 print("Login successful!")
                 self._is_logged_in = True
                 return True
             else:
-                print("Login may have failed. Current URL:", current_url)
+                print("Login may have failed. Waiting for manual login...")
                 return self._wait_for_manual_login()
 
         except Exception as e:
             print(f"Login error: {e}")
             return self._wait_for_manual_login()
+
+    def _check_if_logged_in(self, url: str) -> bool:
+        """Check if the current page indicates logged in state"""
+        # Check URL patterns
+        logged_in_patterns = ['/app', '/dashboard', '/home', '/analyze', '/data', '/reports', '/insights']
+        login_patterns = ['/login', '/signin', '/auth']
+
+        url_lower = url.lower()
+
+        # If we're on a login page, not logged in
+        if any(pattern in url_lower for pattern in login_patterns):
+            return False
+
+        # If we're on an app page, logged in
+        if any(pattern in url_lower for pattern in logged_in_patterns):
+            return True
+
+        # Check for sidebar/navigation elements that indicate logged-in state
+        if self.browser.find_element(self.SELECTORS["sidebar"]):
+            return True
+
+        return False
 
     def _wait_for_manual_login(self, timeout: int = 300) -> bool:
         """Wait for user to complete manual login"""
@@ -188,9 +216,10 @@ class HeapScraper:
 
         while time.time() - start_time < timeout:
             current_url = self.browser.get_current_url()
-            if "/app" in current_url or "dashboard" in current_url:
+            if self._check_if_logged_in(current_url):
                 print("Login detected!")
                 self._is_logged_in = True
+                time.sleep(3)  # Wait for page to stabilize
                 return True
             time.sleep(2)
 
@@ -201,390 +230,418 @@ class HeapScraper:
         """Check if currently logged in"""
         return self._is_logged_in
 
-    def navigate_to_section(self, section: str) -> bool:
-        """Navigate to a specific section of Heap"""
-        section_map = {
-            "dashboard": "/app/dashboard",
-            "analyze": "/app/analyze",
-            "users": "/app/users",
-            "events": "/app/events",
-            "funnels": "/app/funnels",
-            "retention": "/app/retention",
-            "paths": "/app/paths",
-        }
-
-        if section.lower() in section_map:
-            url = f"{self.config.heap.base_url}{section_map[section.lower()]}"
-            self.browser.navigate(url)
-            self.browser.wait_for_page_load()
-            self._wait_for_loading()
-            return True
-        return False
-
     def _wait_for_loading(self, timeout: int = 30):
-        """Wait for loading indicators to disappear"""
+        """Wait for loading indicators to disappear and page to stabilize"""
+        time.sleep(2)  # Initial wait
         start = time.time()
         while time.time() - start < timeout:
             if not self.browser.is_element_visible(self.SELECTORS["loading"]):
-                time.sleep(1)  # Additional buffer
+                time.sleep(2)  # Additional buffer for dynamic content
                 return
             time.sleep(0.5)
+        time.sleep(2)  # Final buffer
 
-    def set_date_range(self, days: int = 30) -> bool:
-        """Set the date range for data extraction"""
-        try:
-            # Click date picker
-            if self.browser.click(self.SELECTORS["date_picker"]):
-                time.sleep(1)
+    def _take_screenshot(self, name: str) -> str:
+        """Take a screenshot with a numbered prefix"""
+        self._screenshot_count += 1
+        os.makedirs("reports/screenshots", exist_ok=True)
+        filename = f"reports/screenshots/{self._screenshot_count:02d}_{name}.png"
+        self.browser.take_screenshot(filename)
+        print(f"  Screenshot saved: {filename}")
+        return filename
 
-                # Select preset
-                preset_selector = None
-                if days <= 7:
-                    preset_selector = self.SELECTORS["date_preset_7d"]
-                elif days <= 30:
-                    preset_selector = self.SELECTORS["date_preset_30d"]
-                else:
-                    preset_selector = self.SELECTORS["date_preset_90d"]
-
-                if preset_selector and self.browser.click(preset_selector):
-                    self._wait_for_loading()
-                    return True
-
-            return False
-        except Exception as e:
-            print(f"Error setting date range: {e}")
-            return False
-
-    def extract_dashboard_metrics(self) -> Dict[str, Any]:
-        """Extract metrics from the main dashboard"""
-        print("Extracting dashboard metrics...")
-        metrics = {}
+    def _extract_text_content(self) -> Dict[str, Any]:
+        """Extract all text content from the current page"""
+        content = {
+            "url": self.browser.get_current_url(),
+            "title": "",
+            "numbers": [],
+            "text_blocks": [],
+            "tables": [],
+            "lists": []
+        }
 
         try:
-            self.navigate_to_section("dashboard")
-            time.sleep(2)
+            # Get page title
+            title_elem = self.browser.find_element("h1, .title, .page-title, [class*='title']")
+            if title_elem:
+                content["title"] = title_elem.text if hasattr(title_elem, 'text') else ""
 
-            # Extract metric cards
-            metric_cards = self.browser.find_elements(self.SELECTORS["metric_card"])
-            for card in metric_cards:
+            # Extract all visible numbers/metrics
+            number_elements = self.browser.find_elements(self.SELECTORS["numbers"])
+            for elem in number_elements:
                 try:
-                    # Try to get metric name and value
-                    card_text = card.text if hasattr(card, 'text') else str(card)
-                    lines = card_text.strip().split('\n')
-                    if len(lines) >= 2:
-                        metric_name = lines[0].strip()
-                        metric_value = lines[1].strip()
-                        metrics[metric_name] = metric_value
-                except Exception:
+                    text = elem.text if hasattr(elem, 'text') else ""
+                    if text and any(c.isdigit() for c in text):
+                        content["numbers"].append(text.strip())
+                except:
                     continue
 
-            # Take screenshot of dashboard
-            self.browser.take_screenshot("reports/screenshots/dashboard.png")
+            # Extract metric cards
+            cards = self.browser.find_elements(self.SELECTORS["metric_cards"])
+            for card in cards:
+                try:
+                    text = card.text if hasattr(card, 'text') else ""
+                    if text:
+                        content["text_blocks"].append(text.strip())
+                except:
+                    continue
 
-            self._extracted_data['dashboard_metrics'] = metrics
-            print(f"Extracted {len(metrics)} dashboard metrics")
-
-        except Exception as e:
-            print(f"Error extracting dashboard metrics: {e}")
-
-        return metrics
-
-    def extract_page_analytics(self) -> List[Dict[str, Any]]:
-        """Extract page view analytics - which pages users spend time on"""
-        print("Extracting page analytics...")
-        pages = []
-
-        try:
-            # Navigate to analyze section for pageviews
-            self.browser.navigate(f"{self.config.heap.base_url}/app/analyze")
-            self.browser.wait_for_page_load()
-            time.sleep(2)
-
-            # Try to extract page data from tables
+            # Extract tables
             tables = self.browser.find_elements(self.SELECTORS["data_table"])
             for table in tables:
                 try:
-                    rows = table.find_elements("css", "tr")
-                    for row in rows[1:]:  # Skip header
-                        cells = row.find_elements("css", "td")
-                        if len(cells) >= 2:
-                            page_data = {
-                                "page": cells[0].text if hasattr(cells[0], 'text') else "",
-                                "views": cells[1].text if len(cells) > 1 and hasattr(cells[1], 'text') else "",
-                                "unique_users": cells[2].text if len(cells) > 2 and hasattr(cells[2], 'text') else "",
-                                "avg_time": cells[3].text if len(cells) > 3 and hasattr(cells[3], 'text') else "",
-                            }
-                            if page_data["page"]:
-                                pages.append(page_data)
-                except Exception:
+                    table_data = self._extract_table_data(table)
+                    if table_data:
+                        content["tables"].append(table_data)
+                except:
                     continue
 
-            # Also try to get data from JavaScript
+            # Extract list items
+            lists = self.browser.find_elements(self.SELECTORS["list_items"])
+            for item in lists[:50]:  # Limit to prevent too many items
+                try:
+                    text = item.text if hasattr(item, 'text') else ""
+                    if text and len(text) < 500:  # Skip very long items
+                        content["lists"].append(text.strip())
+                except:
+                    continue
+
+        except Exception as e:
+            print(f"  Error extracting content: {e}")
+
+        return content
+
+    def _extract_table_data(self, table) -> List[List[str]]:
+        """Extract data from a table element"""
+        data = []
+        try:
+            rows = table.find_elements("css", "tr")
+            for row in rows[:100]:  # Limit rows
+                cells = row.find_elements("css", "th, td")
+                row_data = []
+                for cell in cells:
+                    text = cell.text if hasattr(cell, 'text') else ""
+                    row_data.append(text.strip())
+                if any(row_data):  # Skip empty rows
+                    data.append(row_data)
+        except:
+            pass
+        return data
+
+    def _find_sidebar_links(self) -> List[Any]:
+        """Find all navigation links in the sidebar"""
+        links = []
+
+        # Try multiple selector strategies
+        selectors = [
+            "nav a",
+            "aside a",
+            ".sidebar a",
+            ".nav a",
+            ".side-nav a",
+            "[role='navigation'] a",
+            ".menu a",
+            ".nav-menu a",
+            "[class*='sidebar'] a",
+            "[class*='nav'] a:not([class*='navbar'])",
+        ]
+
+        for selector in selectors:
             try:
-                js_data = self.browser.execute_script("""
-                    // Try to extract data from React state or window objects
-                    if (window.__HEAP_DATA__) return JSON.stringify(window.__HEAP_DATA__);
-                    if (window.heapData) return JSON.stringify(window.heapData);
-                    return null;
-                """)
-                if js_data:
-                    parsed = json.loads(js_data)
-                    if isinstance(parsed, dict) and 'pages' in parsed:
-                        pages.extend(parsed['pages'])
-            except Exception:
-                pass
+                found = self.browser.find_elements(selector)
+                if found:
+                    links.extend(found)
+            except:
+                continue
 
-            self._extracted_data['page_analytics'] = pages
-            print(f"Extracted {len(pages)} page analytics records")
-
-        except Exception as e:
-            print(f"Error extracting page analytics: {e}")
-
-        return pages
-
-    def extract_user_paths(self) -> List[Dict[str, Any]]:
-        """Extract user journey paths and patterns"""
-        print("Extracting user paths...")
-        paths = []
-
-        try:
-            # Navigate to paths section
-            self.browser.navigate(f"{self.config.heap.base_url}/app/paths")
-            self.browser.wait_for_page_load()
-            time.sleep(3)
-            self._wait_for_loading()
-
-            # Take screenshot of paths
-            self.browser.take_screenshot("reports/screenshots/paths.png")
-
-            # Try to extract path data
-            path_elements = self.browser.find_elements(".path-node, .journey-step, [data-path]")
-            current_path = []
-
-            for elem in path_elements:
-                try:
-                    step_text = elem.text if hasattr(elem, 'text') else ""
-                    if step_text:
-                        current_path.append(step_text)
-                except Exception:
-                    continue
-
-            if current_path:
-                paths.append({
-                    "path": current_path,
-                    "type": "common_journey"
-                })
-
-            # Extract from JavaScript if available
+        # Remove duplicates based on href
+        seen_hrefs = set()
+        unique_links = []
+        for link in links:
             try:
-                js_paths = self.browser.execute_script("""
-                    // Look for path data in page
-                    const pathData = [];
-                    document.querySelectorAll('[data-path], .path-visualization').forEach(el => {
-                        pathData.push(el.innerText);
-                    });
-                    return JSON.stringify(pathData);
-                """)
-                if js_paths:
-                    parsed = json.loads(js_paths)
-                    for p in parsed:
-                        if p:
-                            paths.append({"path": p.split(" -> ") if " -> " in p else [p], "type": "extracted"})
-            except Exception:
-                pass
+                href = link.get_attribute('href') if hasattr(link, 'get_attribute') else None
+                if href and href not in seen_hrefs:
+                    seen_hrefs.add(href)
+                    unique_links.append(link)
+            except:
+                continue
 
-            self._extracted_data['user_paths'] = paths
-            print(f"Extracted {len(paths)} user paths")
+        return unique_links
 
-        except Exception as e:
-            print(f"Error extracting user paths: {e}")
+    def _find_clickable_elements(self) -> List[Any]:
+        """Find clickable elements in the main content area"""
+        elements = []
 
-        return paths
+        selectors = [
+            ".card",
+            ".metric",
+            ".widget",
+            "[class*='clickable']",
+            ".kpi",
+            "[role='button']",
+            ".panel-heading",
+            ".chart-title",
+            "[class*='expand']",
+            "[class*='detail']",
+        ]
 
-    def extract_events(self) -> List[Dict[str, Any]]:
-        """Extract event data"""
-        print("Extracting events...")
-        events = []
+        for selector in selectors:
+            try:
+                found = self.browser.find_elements(selector)
+                elements.extend(found[:10])  # Limit per selector
+            except:
+                continue
 
-        try:
-            # Navigate to events section
-            self.browser.navigate(f"{self.config.heap.base_url}/app/events")
-            self.browser.wait_for_page_load()
-            time.sleep(2)
-            self._wait_for_loading()
+        return elements[:20]  # Total limit
 
-            # Extract from event rows
-            event_rows = self.browser.find_elements(self.SELECTORS["event_row"])
-            for row in event_rows:
-                try:
-                    row_text = row.text if hasattr(row, 'text') else ""
-                    parts = row_text.split('\n')
-                    if parts:
-                        event = {
-                            "name": parts[0] if len(parts) > 0 else "",
-                            "count": parts[1] if len(parts) > 1 else "",
-                            "type": "auto" if "auto" in row_text.lower() else "custom"
-                        }
-                        if event["name"]:
-                            events.append(event)
-                except Exception:
-                    continue
+    def explore_sidebar(self) -> Dict[str, Any]:
+        """Click through all sidebar items and extract data"""
+        print("\n" + "=" * 60)
+        print("EXPLORING SIDEBAR NAVIGATION")
+        print("=" * 60)
 
-            # Take screenshot
-            self.browser.take_screenshot("reports/screenshots/events.png")
+        all_sections = {}
 
-            self._extracted_data['events'] = events
-            print(f"Extracted {len(events)} events")
+        # First, take a screenshot of the initial state
+        self._take_screenshot("initial_dashboard")
+        time.sleep(2)
 
-        except Exception as e:
-            print(f"Error extracting events: {e}")
+        # Find all sidebar links
+        sidebar_links = self._find_sidebar_links()
+        print(f"\nFound {len(sidebar_links)} navigation links")
 
-        return events
+        # Get link info before clicking (as clicking may change the DOM)
+        link_info = []
+        for link in sidebar_links:
+            try:
+                text = link.text if hasattr(link, 'text') else ""
+                href = link.get_attribute('href') if hasattr(link, 'get_attribute') else ""
+                if text and href:
+                    link_info.append({"text": text.strip(), "href": href, "element": link})
+            except:
+                continue
 
-    def extract_user_segments(self) -> List[Dict[str, Any]]:
-        """Extract user segment data"""
-        print("Extracting user segments...")
-        segments = []
+        print(f"Navigation items: {[l['text'] for l in link_info]}")
 
-        try:
-            # Navigate to users section
-            self.browser.navigate(f"{self.config.heap.base_url}/app/users")
-            self.browser.wait_for_page_load()
-            time.sleep(2)
-            self._wait_for_loading()
+        # Click each link and extract data
+        for i, info in enumerate(link_info):
+            section_name = info['text']
+            href = info['href']
 
-            # Extract segment information
-            segment_elements = self.browser.find_elements(".segment, .user-segment, [data-segment]")
-            for elem in segment_elements:
-                try:
-                    segment_text = elem.text if hasattr(elem, 'text') else ""
-                    if segment_text:
-                        segments.append({
-                            "name": segment_text.split('\n')[0],
-                            "count": segment_text.split('\n')[1] if '\n' in segment_text else ""
-                        })
-                except Exception:
-                    continue
+            # Skip if already visited
+            if href in self._visited_urls:
+                continue
 
-            self._extracted_data['user_segments'] = segments
-            print(f"Extracted {len(segments)} user segments")
+            print(f"\n[{i+1}/{len(link_info)}] Exploring: {section_name}")
 
-        except Exception as e:
-            print(f"Error extracting user segments: {e}")
+            try:
+                # Navigate to the link
+                self.browser.navigate(href)
+                self.browser.wait_for_page_load()
+                self._wait_for_loading()
 
-        return segments
+                self._visited_urls.add(href)
 
-    def extract_funnel_data(self) -> List[Dict[str, Any]]:
-        """Extract funnel analysis data"""
-        print("Extracting funnel data...")
-        funnels = []
+                # Take screenshot
+                safe_name = "".join(c if c.isalnum() else "_" for c in section_name)
+                self._take_screenshot(safe_name)
 
-        try:
-            # Navigate to funnels section
-            self.browser.navigate(f"{self.config.heap.base_url}/app/funnels")
-            self.browser.wait_for_page_load()
-            time.sleep(2)
-            self._wait_for_loading()
+                # Extract content
+                section_data = self._extract_text_content()
+                section_data["section_name"] = section_name
 
-            # Take screenshot
-            self.browser.take_screenshot("reports/screenshots/funnels.png")
+                # Try to find and click sub-items for more detail
+                sub_data = self._explore_section_details()
+                if sub_data:
+                    section_data["details"] = sub_data
 
-            # Extract funnel steps
-            funnel_steps = self.browser.find_elements(".funnel-step, .conversion-step, [data-funnel-step]")
-            current_funnel = {"steps": [], "conversion_rates": []}
+                all_sections[section_name] = section_data
+                print(f"  Extracted: {len(section_data.get('numbers', []))} numbers, "
+                      f"{len(section_data.get('tables', []))} tables, "
+                      f"{len(section_data.get('text_blocks', []))} text blocks")
 
-            for step in funnel_steps:
-                try:
-                    step_text = step.text if hasattr(step, 'text') else ""
-                    if step_text:
-                        lines = step_text.split('\n')
-                        current_funnel["steps"].append(lines[0] if lines else "")
-                        if len(lines) > 1:
-                            # Try to extract conversion rate
-                            for line in lines[1:]:
-                                if '%' in line:
-                                    current_funnel["conversion_rates"].append(line)
-                except Exception:
-                    continue
+            except Exception as e:
+                print(f"  Error exploring {section_name}: {e}")
+                continue
 
-            if current_funnel["steps"]:
-                funnels.append(current_funnel)
+        return all_sections
 
-            self._extracted_data['funnels'] = funnels
-            print(f"Extracted {len(funnels)} funnels")
+    def _explore_section_details(self) -> List[Dict[str, Any]]:
+        """Within a section, click on items to get more details"""
+        details = []
 
-        except Exception as e:
-            print(f"Error extracting funnel data: {e}")
+        clickable = self._find_clickable_elements()
 
-        return funnels
+        for elem in clickable[:5]:  # Limit to prevent infinite loops
+            try:
+                # Get current URL to detect navigation
+                before_url = self.browser.get_current_url()
 
-    def extract_retention_data(self) -> Dict[str, Any]:
-        """Extract retention analysis data"""
-        print("Extracting retention data...")
-        retention = {}
+                # Try to click
+                elem.click()
+                time.sleep(2)
+                self._wait_for_loading()
 
-        try:
-            # Navigate to retention section
-            self.browser.navigate(f"{self.config.heap.base_url}/app/retention")
-            self.browser.wait_for_page_load()
-            time.sleep(2)
-            self._wait_for_loading()
+                after_url = self.browser.get_current_url()
 
-            # Take screenshot
-            self.browser.take_screenshot("reports/screenshots/retention.png")
+                # If we navigated somewhere new, extract that data
+                if after_url != before_url and after_url not in self._visited_urls:
+                    self._visited_urls.add(after_url)
+                    detail_data = self._extract_text_content()
+                    self._take_screenshot("detail_view")
+                    details.append(detail_data)
 
-            # Extract retention metrics
-            retention_elements = self.browser.find_elements(".retention-cell, .cohort-cell, [data-retention]")
-            retention_values = []
+                    # Go back
+                    self.browser.navigate(before_url)
+                    self.browser.wait_for_page_load()
+                    self._wait_for_loading()
 
-            for elem in retention_elements:
-                try:
-                    value = elem.text if hasattr(elem, 'text') else ""
-                    if value and '%' in value:
-                        retention_values.append(value)
-                except Exception:
-                    continue
+            except:
+                continue
 
-            retention['values'] = retention_values
-
-            self._extracted_data['retention'] = retention
-            print(f"Extracted retention data with {len(retention_values)} values")
-
-        except Exception as e:
-            print(f"Error extracting retention data: {e}")
-
-        return retention
+        return details
 
     def extract_all_data(self, date_range_days: int = 30) -> Dict[str, Any]:
-        """Extract all available data from Heap Analytics"""
+        """Extract all available data from Heap Analytics by clicking through everything"""
         print(f"\nExtracting all Heap Analytics data for the last {date_range_days} days...")
         print("=" * 60)
 
         # Ensure screenshot directory exists
-        import os
         os.makedirs("reports/screenshots", exist_ok=True)
 
-        # Set date range
-        self.set_date_range(date_range_days)
+        # Store initial URL to return to
+        initial_url = self.browser.get_current_url()
 
-        # Extract all data types
+        # Wait for dashboard to fully load
+        time.sleep(3)
+        self._wait_for_loading()
+
+        # Extract data from current page first (dashboard)
+        print("\nExtracting initial dashboard data...")
+        dashboard_data = self._extract_text_content()
+        self._take_screenshot("dashboard")
+
+        # Explore all sidebar sections
+        sections_data = self.explore_sidebar()
+
+        # Compile all data
         all_data = {
             "extraction_date": datetime.now().isoformat(),
             "date_range_days": date_range_days,
-            "dashboard_metrics": self.extract_dashboard_metrics(),
-            "page_analytics": self.extract_page_analytics(),
-            "user_paths": self.extract_user_paths(),
-            "events": self.extract_events(),
-            "user_segments": self.extract_user_segments(),
-            "funnels": self.extract_funnel_data(),
-            "retention": self.extract_retention_data(),
+            "initial_url": initial_url,
+            "dashboard": dashboard_data,
+            "sections": sections_data,
+            "visited_urls": list(self._visited_urls),
+            "screenshot_count": self._screenshot_count,
+            # For backward compatibility with report generator
+            "dashboard_metrics": self._compile_metrics(dashboard_data, sections_data),
+            "page_analytics": self._compile_pages(sections_data),
+            "events": self._compile_events(sections_data),
+            "user_paths": [],
+            "user_segments": [],
+            "funnels": self._compile_funnels(sections_data),
+            "retention": self._compile_retention(sections_data),
         }
 
         self._extracted_data = all_data
+
+        print("\n" + "=" * 60)
+        print("DATA EXTRACTION COMPLETE!")
+        print(f"  Sections explored: {len(sections_data)}")
+        print(f"  Screenshots taken: {self._screenshot_count}")
+        print(f"  URLs visited: {len(self._visited_urls)}")
         print("=" * 60)
-        print("Data extraction complete!")
 
         return all_data
+
+    def _compile_metrics(self, dashboard: Dict, sections: Dict) -> Dict[str, Any]:
+        """Compile metrics from extracted data for backward compatibility"""
+        metrics = {}
+
+        # Extract from dashboard numbers
+        for i, num in enumerate(dashboard.get("numbers", [])[:20]):
+            metrics[f"metric_{i+1}"] = num
+
+        # Extract from text blocks that look like metrics
+        for block in dashboard.get("text_blocks", []):
+            lines = block.split('\n')
+            if len(lines) >= 2:
+                # Assume format: label\nvalue
+                label = lines[0].strip()
+                value = lines[1].strip()
+                if any(c.isdigit() for c in value):
+                    metrics[label] = value
+
+        return metrics
+
+    def _compile_pages(self, sections: Dict) -> List[Dict[str, Any]]:
+        """Compile page analytics from sections"""
+        pages = []
+
+        for section_name, section_data in sections.items():
+            for table in section_data.get("tables", []):
+                if len(table) > 1:  # Has header and data
+                    headers = table[0] if table else []
+                    for row in table[1:]:
+                        if row and len(row) >= 2:
+                            page_data = {
+                                "page": row[0] if row else "",
+                                "views": row[1] if len(row) > 1 else "",
+                                "unique_users": row[2] if len(row) > 2 else "",
+                                "avg_time": row[3] if len(row) > 3 else "",
+                                "source_section": section_name
+                            }
+                            if page_data["page"]:
+                                pages.append(page_data)
+
+        return pages
+
+    def _compile_events(self, sections: Dict) -> List[Dict[str, Any]]:
+        """Compile events from sections"""
+        events = []
+
+        # Look for event-related sections
+        for section_name, section_data in sections.items():
+            if 'event' in section_name.lower():
+                for table in section_data.get("tables", []):
+                    for row in table[1:]:  # Skip header
+                        if row:
+                            events.append({
+                                "name": row[0] if row else "",
+                                "count": row[1] if len(row) > 1 else "",
+                                "type": "extracted"
+                            })
+
+        return events
+
+    def _compile_funnels(self, sections: Dict) -> List[Dict[str, Any]]:
+        """Compile funnel data from sections"""
+        funnels = []
+
+        for section_name, section_data in sections.items():
+            if 'funnel' in section_name.lower():
+                funnel = {
+                    "name": section_name,
+                    "steps": [],
+                    "conversion_rates": section_data.get("numbers", [])
+                }
+                funnels.append(funnel)
+
+        return funnels
+
+    def _compile_retention(self, sections: Dict) -> Dict[str, Any]:
+        """Compile retention data from sections"""
+        retention = {"values": []}
+
+        for section_name, section_data in sections.items():
+            if 'retention' in section_name.lower():
+                # Look for percentage values
+                for num in section_data.get("numbers", []):
+                    if '%' in str(num):
+                        retention["values"].append(num)
+
+        return retention
 
     def get_extracted_data(self) -> Dict[str, Any]:
         """Get all extracted data"""
@@ -592,7 +649,6 @@ class HeapScraper:
 
     def save_raw_data(self, filepath: str):
         """Save extracted data to JSON file"""
-        import os
         os.makedirs(os.path.dirname(filepath) or '.', exist_ok=True)
         with open(filepath, 'w') as f:
             json.dump(self._extracted_data, f, indent=2, default=str)
