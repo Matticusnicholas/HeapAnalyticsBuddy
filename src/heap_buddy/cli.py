@@ -227,9 +227,36 @@ def generate(browser, headless, email, password, output_dir, formats, days, comp
                 company = input("\nCompany name (optional, press Enter to skip): ").strip()
                 company = company or None
 
+        # Prompt for credentials if not provided via CLI or env vars
+        if not email and not os.getenv('HEAP_EMAIL'):
+            print("\n--- Heap Analytics Login ---")
+            if QUESTIONARY_AVAILABLE:
+                email = questionary.text(
+                    "Heap Analytics Email (or press Enter for manual browser login):",
+                    style=custom_style
+                ).ask()
+            else:
+                email = input("Heap Analytics Email (or press Enter for manual browser login): ").strip()
+            email = email or None
+
+        if email and not password and not os.getenv('HEAP_PASSWORD'):
+            if QUESTIONARY_AVAILABLE:
+                password = questionary.password(
+                    "Heap Analytics Password:",
+                    style=custom_style
+                ).ask()
+            else:
+                import getpass
+                password = getpass.getpass("Heap Analytics Password: ")
+            password = password or None
+
     # Set defaults
     browser = browser or "firefox"
     formats = list(formats) if formats else ["pdf", "docx"]
+
+    # Determine login method for display
+    has_credentials = bool(email or os.getenv('HEAP_EMAIL'))
+    login_method = f"Auto-login ({email or os.getenv('HEAP_EMAIL')})" if has_credentials else "Manual browser login"
 
     if RICH_AVAILABLE:
         console.print(Panel.fit(
@@ -238,7 +265,8 @@ def generate(browser, headless, email, password, output_dir, formats, days, comp
             f"Headless: {headless}\n"
             f"Date Range: {days} days\n"
             f"Output Formats: {', '.join(formats)}\n"
-            f"Output Directory: {output_dir}",
+            f"Output Directory: {output_dir}\n"
+            f"Login: {login_method}",
             title="Report Settings"
         ))
     else:
@@ -248,6 +276,7 @@ def generate(browser, headless, email, password, output_dir, formats, days, comp
         print(f"Date Range: {days} days")
         print(f"Output Formats: {', '.join(formats)}")
         print(f"Output Directory: {output_dir}")
+        print(f"Login: {login_method}")
         print("-------------------\n")
 
     # Confirm before proceeding
